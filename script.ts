@@ -45,12 +45,14 @@ type ScriptLogEntry<R> = {type: 'interactCall', user: User, template: string, da
                        | {type: 'interactResponse', logIndex: number, response: R}
                        | {type: 'allocUser', role: string, extraData: any};
 
+type Requester<R> = (u: User, t: string, d: any) => Promise<R>;
+
 abstract class InteractionScript<I, R, A> { // TODO: Probably want I, R, and A to be JSONGraphs.
     private userCount: number = 0;
     private _log: Array<ScriptLogEntry<R>> = [];
 
     // TODO: Add logIndex to requester.
-    constructor(private readonly requester: (u: User, t: string, d: any) => Promise<R>) { }
+    constructor(private readonly requester: Requester<R>) { }
 
     get log(): Array<ScriptLogEntry<R>> { return this._log; } // TODO: Maybe make a copy...
 
@@ -137,16 +139,19 @@ const responseObservable: Observable<FEResponse> = merge(
     fromEvent(askBtn, 'click').pipe(map((_: Event) => { return {type: 'Questions', subquestions: [inputTxt.value]}; })),
     asapScheduler) as Observable<FEResponse>; // TODO: Can I get rid of this cast?
 
-// TODO: There's got to be a better way of doing this.
+// TODO: There's got to be a better way of doing this, than this nextEvent stuff.
 let resolver: ((r: FEResponse) => void) | null = null;
 
 responseObservable.subscribe(r => {
-    console.log({subscribe: r});
     const res = resolver;
     if(res !== null) {
         res(r);
     }
 });
+
+const nextEvent: () => Promise<FEResponse> = () => {
+    return new Promise<FEResponse>((resolve, reject) => resolver = resolve);
+};
 
 const requester = (u: User, t: string, d: any) => {
     console.log({user: u, template: t, data: d});
@@ -166,7 +171,30 @@ const requester = (u: User, t: string, d: any) => {
         firstAnswerLabel.textContent = '';
         secondAnswerLabel.textContent = '';
     }
-    return new Promise<FEResponse>((resolve, reject) => resolver = resolve);
+    return nextEvent();
 };
 
-new FE(requester).start('What is your question?').then(r => console.log({done: r}));
+function makeReplayRequester<R>(log: Array<ScriptLogEntry<R>>, requester: Requester<R>): Requester<R> {
+    let i = 0;
+    return (u: User, t: string, d: any) => {
+        while(i < log.length) {
+            const entry = log[i++];
+            if(entry.type === 'interactResponse') { // TODO: Be smarter about matching the response to the request. This will be necessary to handle concurrency.
+                return Promise.resolve(entry.response);
+            }
+        }
+        return requester(u, t, d);
+    };
+}
+
+const script = new FE(requester);
+script.start('What is your question?').then(r => {
+    console.log({done: r})
+    console.log(script.log);
+    const replayRequester = makeReplayRequester<FEResponse>(script.log.slice(0, 13), requester);
+    const replayScript = new FE(replayRequester);
+    replayScript.start('What is your question?').then(r2 => {
+        console.log({replayDone: r2})
+        console.log(replayScript.log);
+    });
+});
