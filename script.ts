@@ -1,7 +1,7 @@
 import { Observable, fromEvent, merge, asapScheduler } from 'rxjs';
 import { first, map } from 'rxjs/operators';
 
-import { PathSet, Path, DataSource, JSONGraph, JSONGraphEnvelope } from 'falcor';
+import { Model, PathSet, Path, DataSource, JSONGraph, JSONGraphEnvelope } from 'falcor';
 
 // DataSources do a good job of representing the "named" data structures.
 
@@ -45,13 +45,13 @@ type ScriptLogEntry<R> = {type: 'interactCall', user: User, template: string, da
                        | {type: 'interactResponse', logIndex: number, response: R}
                        | {type: 'allocUser', role: string, extraData: any};
 
-type Requester<R> = (u: User, t: string, d: any) => Promise<R>;
+// The logIndex isn't really meant for the template but to help correlate to the interaction log.
+type Requester<R> = (u: User, t: string, logIndex: number, d: any) => Promise<R>;
 
 abstract class InteractionScript<I, R, A> { // TODO: Probably want I, R, and A to be JSONGraphs.
     private userCount: number = 0;
     private _log: Array<ScriptLogEntry<R>> = [];
 
-    // TODO: Add logIndex to requester.
     constructor(private readonly requester: Requester<R>) { }
 
     get log(): Array<ScriptLogEntry<R>> { return this._log; } // TODO: Maybe make a copy...
@@ -63,7 +63,7 @@ abstract class InteractionScript<I, R, A> { // TODO: Probably want I, R, and A t
     async interact(user: User, template: string, data: any): Promise<R> {
         const logIndex = this._log.length;
         this._log.push({type: 'interactCall', user: user, template: template, data: data});
-        const r = await this.requester(user, template, data);
+        const r = await this.requester(user, template, logIndex, data);
         this._log.push({type: 'interactResponse', logIndex: logIndex, response: r});
         return r;
     }
@@ -83,7 +83,10 @@ type FEResponse = {type: 'Questions', subquestions: Array<Question>}
                 | {type: 'Answer', answer: Answer};
 
 class FE extends InteractionScript<Question, FEResponse, Answer> {
-    constructor(requester: (u: User, t: string, d: any) => Promise<FEResponse>) {
+    readonly dsw: DataSourceWrapper = new DataSourceWrapper(new Model({cache: {}}).asDataSource());
+    private readonly model: Model = new Model({source: this.dsw});
+
+    constructor(requester: Requester<FEResponse>) {
         super(requester);
     }
 
@@ -94,25 +97,31 @@ class FE extends InteractionScript<Question, FEResponse, Answer> {
         const mo = await this.allocUser('maliciousOracleRole');
         const ma = await this.interact(mo, 'malicious_template', {question: qTop, honest_answer: ha.answer});
         if(ma.type !== 'Answer') throw ma;
-        return await this.adjudicate(qTop, [], ha.answer, ma.answer, ho, mo);
+        return await this.adjudicate(qTop, 'root', [], ha.answer, ma.answer, ho, mo);
     }
 
-    private async adjudicate(q: Question, oldQs: Array<[Question, Answer]>, ha: Answer, ma: Answer, ho: User, mo: User): Promise<Answer> {
+    private async adjudicate(q: Question, wsId: string, oldQs: Array<[Question, Answer]>, ha: Answer, ma: Answer, ho: User, mo: User): Promise<Answer> {
         const u = await this.allocUser('adjudicatorRole');
         const r = await this.interact(u, 'adjudicate_template', {question: q, honest_answer: ha, malicious_answer: ma, subquestions: oldQs});
+        await this.model.setValue(wsId+'.question', q);
+        await this.model.setValue(wsId+'.honest_answer', ha);
+        await this.model.setValue(wsId+'.malicious_answer', ma);
         if(r.type === 'Questions') {
             const subQs = r.subquestions;
-            const subAnswers = await Promise.all(subQs.map(async subQ => {
+            const j = oldQs.length;
+            const subAnswers = await Promise.all(subQs.map(async (subQ, i) => {
                 const subHA = await this.interact(ho, 'honest_template', {question: subQ});
                 if(subHA.type !== 'Answer') throw subHA;
                 const subMA = await this.interact(mo, 'malicious_template', {question: subQ, honest_answer: subHA.answer});
                 if(subMA.type !== 'Answer') throw subMA;
-                return this.adjudicate(subQ, [], subHA.answer, subMA.answer, ho, mo);
+                return this.adjudicate(subQ, wsId+'.subquestions['+(j+i)+']', [], subHA.answer, subMA.answer, ho, mo);
             }));
             const newQs = oldQs.concat(subQs.map((q, i) => [q, subAnswers[i]]));
-            return this.adjudicate(q, newQs, ha, ma, ho, mo);
+            return this.adjudicate(q, wsId, newQs, ha, ma, ho, mo);
         } else if(r.type === 'ChoseHonest') {
-            return r.choice ? ha : ma;
+            const answer = r.choice ? ha : ma;
+            await this.model.setValue(wsId+'.answer', answer);
+            return answer;
         } else {
             throw r;
         }
@@ -153,8 +162,8 @@ const nextEvent: () => Promise<FEResponse> = () => {
     return new Promise<FEResponse>((resolve, reject) => resolver = resolve);
 };
 
-const requester = (u: User, t: string, d: any) => {
-    console.log({user: u, template: t, data: d});
+const requester: Requester<FEResponse> = (u: User, t: string, logIndex: number, d: any) => {
+    console.log({user: u, template: t, logIndex: logIndex, data: d});
     roleLabel.textContent = u.role;
     inputTxt.value = '';
     questionLabel.textContent = d.question;
@@ -176,18 +185,18 @@ const requester = (u: User, t: string, d: any) => {
 
 function makeReplayRequester<R>(log: Array<ScriptLogEntry<R>>, requester: Requester<R>): Requester<R> {
     let i = 0;
-    return (u: User, t: string, d: any) => {
+    return (u: User, t: string, logIndex: number, d: any) => {
         while(i < log.length) {
             const entry = log[i++];
             if(entry.type === 'interactResponse') { // TODO: Be smarter about matching the response to the request. This will be necessary to handle concurrency.
                 return Promise.resolve(entry.response);
             }
         }
-        return requester(u, t, d);
+        return requester(u, t, logIndex, d);
     };
 }
 
-const script = new FE(requester);
+export const script = new FE(requester); // export is temporary.
 script.start('What is your question?').then(r => {
     console.log({done: r})
     console.log(script.log);

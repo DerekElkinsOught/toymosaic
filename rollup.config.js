@@ -20,7 +20,7 @@ export default {
                 'node_modules/react/index.js': ['Children', 'Component', 'PropTypes', 'createElement'],
                 'node_modules/react-dom/index.js': ['render'],
                 'node_modules/react-is/index.js': ['isForwardRef', 'isValidElementType'],
-                'node_modules/falcor/lib/index.js': ['PathSet', 'Path', 'DataSource', 'JSONGraph', 'JSONGraphEnvelope', 'Observable']
+                'node_modules/falcor/lib/index.js': ['PathSet', 'Path', 'DataSource', 'JSONGraph', 'JSONGraphEnvelope', 'Observable', 'Model']
             }
         }),
         globals(),
