@@ -83,10 +83,10 @@ type FEResponse = {type: 'Questions', subquestions: Array<Question>}
                 | {type: 'Answer', answer: Answer};
 
 class FE extends InteractionScript<Question, FEResponse, Answer> {
-    readonly dsw: DataSourceWrapper = new DataSourceWrapper(new Model({cache: {}}).asDataSource());
     private readonly model: Model = new Model({source: this.dsw});
 
-    constructor(requester: Requester<FEResponse>) {
+    constructor(requester: Requester<FEResponse>,
+                readonly dsw: DataSourceWrapper = new DataSourceWrapper(new Model({cache: {}}).asDataSource())) {
         super(requester);
     }
 
