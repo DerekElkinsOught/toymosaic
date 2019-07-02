@@ -243,59 +243,92 @@ class FE extends InteractionScript<Question, FEResponse, Answer, FESchedulerMess
     }
 }
 
-const roleLabel = document.getElementById('roleLabel') as HTMLSpanElement;
-const questionLabel = document.getElementById('questionLabel') as HTMLSpanElement;
-const extraLabel = document.getElementById('extraLabel') as HTMLSpanElement;
-const inputTxt = document.getElementById('inputTxt') as HTMLInputElement;
-const expertDiv = document.getElementById('expertDiv') as HTMLDivElement;
-const answerBtn = document.getElementById('answerBtn') as HTMLInputElement;
-const judgeDiv = document.getElementById('judgeDiv') as HTMLDivElement;
-const askBtn = document.getElementById('askBtn') as HTMLInputElement;
-const firstAnswerLabel = document.getElementById('firstAnswerLabel') as HTMLSpanElement;
-const firstBtn = document.getElementById('firstBtn') as HTMLInputElement;
-const secondAnswerLabel = document.getElementById('secondAnswerLabel') as HTMLSpanElement;
-const secondBtn = document.getElementById('secondBtn') as HTMLInputElement;
+const elements = [1,2,3,4].map(i => {
+    const roleLabel = document.getElementById('roleLabel'+i) as HTMLSpanElement;
+    const questionLabel = document.getElementById('questionLabel'+i) as HTMLSpanElement;
+    const extraLabel = document.getElementById('extraLabel'+i) as HTMLSpanElement;
+    const inputTxt = document.getElementById('inputTxt'+i) as HTMLInputElement;
+    const expertDiv = document.getElementById('expertDiv'+i) as HTMLDivElement;
+    const answerBtn = document.getElementById('answerBtn'+i) as HTMLInputElement;
+    const judgeDiv = document.getElementById('judgeDiv'+i) as HTMLDivElement;
+    const askBtn = document.getElementById('askBtn'+i) as HTMLInputElement;
+    const firstAnswerLabel = document.getElementById('firstAnswerLabel'+i) as HTMLSpanElement;
+    const firstBtn = document.getElementById('firstBtn'+i) as HTMLInputElement;
+    const secondAnswerLabel = document.getElementById('secondAnswerLabel'+i) as HTMLSpanElement;
+    const secondBtn = document.getElementById('secondBtn'+i) as HTMLInputElement;
+    return {roleLabel: roleLabel
+           ,questionLabel: questionLabel
+           ,extraLabel: extraLabel
+           ,inputTxt: inputTxt
+           ,expertDiv: expertDiv
+           ,answerBtn: answerBtn
+           ,judgeDiv: judgeDiv
+           ,askBtn: askBtn
+           ,firstAnswerLabel: firstAnswerLabel
+           ,firstBtn: firstBtn
+           ,secondAnswerLabel: secondAnswerLabel
+           ,secondBtn: secondBtn};
 
-const responseObservable: Observable<FEResponse> = merge(
-    fromEvent(answerBtn, 'click').pipe(map((_: Event) => { return {type: 'Answer', answer: inputTxt.value}; })),
-    fromEvent(firstBtn, 'click').pipe(map((_: Event) => { return {type: 'ChoseHonest', choice: true}; })),
-    fromEvent(secondBtn, 'click').pipe(map((_: Event) => { return {type: 'ChoseHonest', choice: false}; })),
-    fromEvent(askBtn, 'click').pipe(map((_: Event) => { return {type: 'Questions', subquestions: [inputTxt.value]}; })),
-    asapScheduler) as Observable<FEResponse>; // TODO: Can I get rid of this cast?
+});
+
+const responseObservable: Observable<[number, FEResponse]> = merge(
+    merge(fromEvent(elements[0].answerBtn, 'click').pipe(map((_: Event) => [0, {type: 'Answer', answer: elements[0].inputTxt.value}])),
+          fromEvent(elements[0].firstBtn, 'click').pipe(map((_: Event) => [0, {type: 'ChoseHonest', choice: true}])),
+          fromEvent(elements[0].secondBtn, 'click').pipe(map((_: Event) => [0, {type: 'ChoseHonest', choice: false}])),
+          fromEvent(elements[0].askBtn, 'click').pipe(map((_: Event) => [0, {type: 'Questions', subquestions: [elements[0].inputTxt.value]}])),
+          asapScheduler),
+    merge(fromEvent(elements[1].answerBtn, 'click').pipe(map((_: Event) => [1, {type: 'Answer', answer: elements[1].inputTxt.value}])),
+          fromEvent(elements[1].firstBtn, 'click').pipe(map((_: Event) => [1, {type: 'ChoseHonest', choice: true}])),
+          fromEvent(elements[1].secondBtn, 'click').pipe(map((_: Event) => [1, {type: 'ChoseHonest', choice: false}])),
+          fromEvent(elements[1].askBtn, 'click').pipe(map((_: Event) => [1, {type: 'Questions', subquestions: [elements[1].inputTxt.value]}])),
+          asapScheduler),
+    merge(fromEvent(elements[2].answerBtn, 'click').pipe(map((_: Event) => [2, {type: 'Answer', answer: elements[2].inputTxt.value}])),
+          fromEvent(elements[2].firstBtn, 'click').pipe(map((_: Event) => [2, {type: 'ChoseHonest', choice: true}])),
+          fromEvent(elements[2].secondBtn, 'click').pipe(map((_: Event) => [2, {type: 'ChoseHonest', choice: false}])),
+          fromEvent(elements[2].askBtn, 'click').pipe(map((_: Event) => [2, {type: 'Questions', subquestions: [elements[2].inputTxt.value]}])),
+          asapScheduler),
+    merge(fromEvent(elements[3].answerBtn, 'click').pipe(map((_: Event) => [3, {type: 'Answer', answer: elements[3].inputTxt.value}])),
+          fromEvent(elements[3].firstBtn, 'click').pipe(map((_: Event) => [3, {type: 'ChoseHonest', choice: true}])),
+          fromEvent(elements[3].secondBtn, 'click').pipe(map((_: Event) => [3, {type: 'ChoseHonest', choice: false}])),
+          fromEvent(elements[3].askBtn, 'click').pipe(map((_: Event) => [3, {type: 'Questions', subquestions: [elements[3].inputTxt.value]}])),
+          asapScheduler),
+    asapScheduler) as Observable<[number, FEResponse]>; // TODO: Can I get rid of this cast?
 
 // TODO: There's got to be a better way of doing this, than this nextEvent stuff.
-let resolver: ((r: FEResponse) => void) | null = null;
+let resolvers: Array<((r: FEResponse) => void) | null> = [null, null, null, null];
 
 responseObservable.subscribe(r => {
-    const res = resolver;
+    console.log(r);
+    const res = resolvers[r[0]];
     if(res !== null) {
-        res(r);
+        res(r[1]);
     }
 });
 
-const nextEvent: () => Promise<FEResponse> = () => {
-    return new Promise<FEResponse>((resolve, reject) => resolver = resolve);
+const nextEvent: (i: number) => Promise<FEResponse> = i => {
+    return new Promise<FEResponse>((resolve, reject) => resolvers[i] = resolve);
 };
 
 const requester: Requester<FEResponse> = (u: User, t: string, logIndex: number, d: any) => {
     console.log({user: u, template: t, logIndex: logIndex, data: d}); // DEBUG
-    roleLabel.textContent = u.id + ': ' + u.extraData.role; // TODO: The user ID is just for understandability. It wouldn't be included for real.
-    inputTxt.value = '';
-    questionLabel.textContent = d.question;
+    const els = elements[u.id];
+    els.roleLabel.textContent = u.id + ': ' + u.extraData.role; // TODO: The user ID is just for understandability. It wouldn't be included for real.
+    els.inputTxt.value = '';
+    els.questionLabel.textContent = d.question;
     if(t === 'adjudicate_template') {
-        expertDiv.style.display = 'none';
-        judgeDiv.style.display = 'block';
-        extraLabel.textContent = d.subquestions.map((x: [Question, Answer]) => x[0]+': '+x[1]).join('\n\n');
-        firstAnswerLabel.textContent = d.honest_answer;
-        secondAnswerLabel.textContent = d.malicious_answer;
+        els.expertDiv.style.display = 'none';
+        els.judgeDiv.style.display = 'block';
+        els.extraLabel.textContent = d.subquestions.map((x: [Question, Answer]) => x[0]+': '+x[1]).join('\n\n');
+        els.firstAnswerLabel.textContent = d.honest_answer;
+        els.secondAnswerLabel.textContent = d.malicious_answer;
     } else {
-        expertDiv.style.display = 'block';
-        judgeDiv.style.display = 'none';
-        extraLabel.textContent = t === 'malicious_template' ? d.honest_answer : '';
-        firstAnswerLabel.textContent = '';
-        secondAnswerLabel.textContent = '';
+        els.expertDiv.style.display = 'block';
+        els.judgeDiv.style.display = 'none';
+        els.extraLabel.textContent = t === 'malicious_template' ? d.honest_answer : '';
+        els.firstAnswerLabel.textContent = '';
+        els.secondAnswerLabel.textContent = '';
     }
-    return nextEvent();
+    return nextEvent(u.id);
 };
 
 function makeReplayRequester<R>(log: Array<ScriptLogEntry<R>>, requester: Requester<R>): Requester<R> {
@@ -328,12 +361,12 @@ function makeLimitedAgentRequester(limit: number): AgentRequester {
     };
 }
 
-export const script = new FE(requester, makeLimitedAgentRequester(4)); // export is temporary.
+export const script = new FE(requester, makeLimitedAgentRequester(elements.length)); // export is temporary.
 script.start('What is your question?').then(r => {
     console.log({done: r})
     console.log(script.log);
     const replayRequester = makeReplayRequester<FEResponse>(script.log.slice(0, 13), requester);
-    const replayScript = new FE(replayRequester, makeSimpleAgentRequester());
+    const replayScript = new FE(replayRequester, makeLimitedAgentRequester(elements.length));
     replayScript.start('What is your question?').then(r2 => {
         console.log({replayDone: r2})
         console.log(replayScript.log);
