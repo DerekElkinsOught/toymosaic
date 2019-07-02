@@ -3,7 +3,7 @@ import { first, map } from 'rxjs/operators';
 
 import { Model, PathSet, Path, DataSource, JSONGraph, JSONGraphEnvelope } from 'falcor';
 
-// DataSources do a good job of representing the "named" data structures.
+// Models do a good job of representing the "named" data structures.
 
 type LogEntry = {type: 'set', jsonGraphEnvelope: JSONGraphEnvelope}
               | {type: 'call', functionPath: Path, args?: Array<any>, refSuffixes?: Array<PathSet>, thisPaths?: Array<PathSet>}
@@ -39,26 +39,47 @@ class DataSourceWrapper implements IDataSource {
     }
 }
 
-type User = {id: number, role: string, extraData: any} // This is a placeholder for what would be some opaque type.
+type User = {id: number, extraData: any} // This is a placeholder for what would be some opaque type.
 
 type ScriptLogEntry<R> = {type: 'interactCall', user: User, template: string, data: any}
                        | {type: 'interactResponse', logIndex: number, response: R}
-                       | {type: 'allocUser', role: string, extraData: any};
+                       | {type: 'sendScheduler', async: Boolean, message: any}
+                       | {type: 'sendSchedulerResponse', logIndex: number, response: any}
+                       | {type: 'allocAgent', extraData: any};
 
 // The logIndex isn't really meant for the template but to help correlate to the interaction log.
 type Requester<R> = (u: User, t: string, logIndex: number, d: any) => Promise<R>;
 
-abstract class InteractionScript<I, R, A> { // TODO: Probably want I, R, and A to be JSONGraphs.
-    private userCount: number = 0;
+type AgentRequester = (hints: any) => Promise<User>;
+
+abstract class InteractionScript<I, R, A, M, SR> {
     private _log: Array<ScriptLogEntry<R>> = [];
 
-    constructor(private readonly requester: Requester<R>) { }
+    constructor(private readonly requester: Requester<R>,
+                private readonly agentRequester: AgentRequester) { }
 
     get log(): Array<ScriptLogEntry<R>> { return this._log; } // TODO: Maybe make a copy...
 
     get logIndex(): number { return this._log.length; }
 
     abstract start(initData: I): Promise<A>;
+
+    // This presents the scheduler as an event-based system. Could use a channel-like abstraction
+    // to allow the scheduler to be written in a cleaner style.
+    abstract schedulerBody(message: M | {type: 'AllocUser', hint: any}): Promise<SR | User | void>;
+
+    protected async sendScheduler(message: M): Promise<SR> {
+        const logIndex = this._log.length;
+        this._log.push({type: 'sendScheduler', async: false, message: message});
+        const r = await this.schedulerBody(message);
+        this._log.push({type: 'sendSchedulerResponse', logIndex: logIndex, response: r});
+        return r as SR;
+    }
+
+    protected sendSchedulerAsync(message: M): void {
+        this._log.push({type: 'sendScheduler', async: true, message: message});
+        this.schedulerBody(message);
+    }
 
     async interact(user: User, template: string, data: any): Promise<R> {
         const logIndex = this._log.length;
@@ -68,9 +89,18 @@ abstract class InteractionScript<I, R, A> { // TODO: Probably want I, R, and A t
         return r;
     }
 
-    async allocUser(role: string, extraData?: any): Promise<User> {
-        this._log.push({type: 'allocUser', role: role, extraData: extraData});
-        return {id: this.userCount++, role: role, extraData: extraData};
+    async allocUser(hint: any): Promise<User> {
+        const logIndex = this._log.length;
+        const message = {type: 'AllocUser', hint: hint} as {type: 'AllocUser', hint: any};
+        this._log.push({type: 'sendScheduler', async: false, message: message});
+        const r = await this.schedulerBody(message);
+        this._log.push({type: 'sendSchedulerResponse', logIndex: logIndex, response: r});
+        return r as User;
+    }
+
+    async allocAgent(extraData: any): Promise<User> {
+        this._log.push({type: 'allocAgent', extraData: extraData});
+        return this.agentRequester(extraData);
     }
 }
 
@@ -82,27 +112,112 @@ type FEResponse = {type: 'Questions', subquestions: Array<Question>}
                 | {type: 'ChoseHonest', choice: Boolean}
                 | {type: 'Answer', answer: Answer};
 
-class FE extends InteractionScript<Question, FEResponse, Answer> {
+interface FESchedulerState {
+    judges: Array<User>,
+    judgeWorkedOn: {[userId: number]: Array<string>}, // Mapping from userId to workspace IDs this judge has worked on.
+    judgeAvailable: {[userId: number]: Boolean}
+}
+
+type FESchedulerMessage = {type: 'AllocUser', hint: any}
+                        | {type: 'UserWorking', user: User}
+                        | {type: 'UserWorkedOn', user: User, workspace: string};
+
+class FE extends InteractionScript<Question, FEResponse, Answer, FESchedulerMessage, User> {
     private readonly model: Model = new Model({source: this.dsw});
+    private readonly schedulerState: FESchedulerState = {judges: [], judgeWorkedOn: {}, judgeAvailable: {}}; // Could be stored in the Model as well.
 
     constructor(requester: Requester<FEResponse>,
+                agentRequester: AgentRequester,
                 readonly dsw: DataSourceWrapper = new DataSourceWrapper(new Model({cache: {}}).asDataSource())) {
-        super(requester);
+        super(requester, agentRequester);
+    }
+
+    async schedulerBody(message: FESchedulerMessage): Promise<User | void> {
+        console.log({message: message, state: this.schedulerState}); // DEBUG
+        switch(message.type) {
+            case 'AllocUser':
+                switch(message.hint.role) {
+                    case 'honestExpertRole':
+                    case 'maliciousExpertRole':
+                        return await this.allocAgent(message.hint);
+                    case 'adjudicatorRole':
+                        // TODO: Implement the below policy, or an approximation of it.
+                        /*
+                        Contamination policy currently used for Mosaic:
+
+                        For judges, in normal scheduling, there must be at least one workspace
+                        separating you from whatever you get assigned to. Expert workspaces count here
+                        though (maybe they shouldn’t). So this is only relevant in judge-to-judge
+                        questioning. (Also, you can get re-assigned to the same workspace if all of the
+                        subquestions have been answered.)
+
+                        For judges, if you opt for suboptimal scheduling, even the constraint described
+                        in the previous paragraph is dropped.
+
+                        There is, however, a preference ordering in the scheduler that does a
+                        lot of contamination work. So assume you’re a judge looking for a workspace
+                        assignment. First, workspaces you’ve already been assigned to are given the
+                        highest priority, and then, among workspaces you haven’t yet been assigned to,
+                        priority is given to those located farthest away from any workspace you’ve
+                        previously been assigned to.
+
+                        https://github.com/oughtinc/mosaic/blob/master/server/lib/scheduler/Scheduler.ts#L421 -L460
+                        for preference ordering.
+                        */
+
+                        try {
+                            const judge = await this.allocAgent(message.hint);
+                            this.schedulerState.judges.push(judge);
+                            return judge;
+                        } catch {
+                            const wsId = message.hint.workspace;
+                            const state = this.schedulerState;
+                            const judges: Array<[User, number]> = state.judges.map(judge => {
+                                if(!state.judgeAvailable[judge.id]) return [judge, -1/0];
+                                const workspaces = state.judgeWorkedOn[judge.id];
+                                if(workspaces.includes(wsId)) return [judge, 1/0];
+                                // TODO: Calculate distance metric.
+                                return [judge, 1];
+                            });
+                            // Sort largest to smallest.
+                            const sortedJudges = judges.sort((a, b) => a[1] < b[1] ? 1 : a[1] > b[1] ? -1 : 0);
+                            const chosenJudge = sortedJudges[0];
+                            // TODO: If this assert failse, no judge is available and we should block until some judge is available.
+                            console.assert(chosenJudge[1] !== -1/0);
+                            return chosenJudge[0];
+                        }
+                }
+                break;
+            case 'UserWorking':
+                this.schedulerState.judgeAvailable[message.user.id] = false;
+                break;
+            case 'UserWorkedOn':
+                this.schedulerState.judgeAvailable[message.user.id] = true;
+                const workspaces = this.schedulerState.judgeWorkedOn[message.user.id];
+                if(workspaces === void(0)) {
+                    this.schedulerState.judgeWorkedOn[message.user.id] = [message.workspace];
+                } else if(!workspaces.includes(message.workspace)) {
+                    workspaces.push(message.workspace);
+                }
+        }
     }
 
     async start(qTop: string): Promise<Answer> {
-        const ho = await this.allocUser('honestOracleRole');
+        const ho = await this.allocUser({role: 'honestExpertRole'});
         const ha = await this.interact(ho, 'honest_template', {question: qTop});
         if(ha.type !== 'Answer') throw ha;
-        const mo = await this.allocUser('maliciousOracleRole');
+        const mo = await this.allocUser({role: 'maliciousExpertRole'});
         const ma = await this.interact(mo, 'malicious_template', {question: qTop, honest_answer: ha.answer});
         if(ma.type !== 'Answer') throw ma;
         return await this.adjudicate(qTop, 'root', [], ha.answer, ma.answer, ho, mo);
     }
 
     private async adjudicate(q: Question, wsId: string, oldQs: Array<[Question, Answer]>, ha: Answer, ma: Answer, ho: User, mo: User): Promise<Answer> {
-        const u = await this.allocUser('adjudicatorRole');
+        const u = await this.allocUser({role: 'adjudicatorRole', workspace: wsId});
+        this.sendSchedulerAsync({type: 'UserWorking', user: u});
         const r = await this.interact(u, 'adjudicate_template', {question: q, honest_answer: ha, malicious_answer: ma, subquestions: oldQs});
+        this.sendSchedulerAsync({type: 'UserWorkedOn', user: u, workspace: wsId});
+        await this.model.setValue(wsId+'.userId', u.id);
         await this.model.setValue(wsId+'.question', q);
         await this.model.setValue(wsId+'.honest_answer', ha);
         await this.model.setValue(wsId+'.malicious_answer', ma);
@@ -163,8 +278,8 @@ const nextEvent: () => Promise<FEResponse> = () => {
 };
 
 const requester: Requester<FEResponse> = (u: User, t: string, logIndex: number, d: any) => {
-    console.log({user: u, template: t, logIndex: logIndex, data: d});
-    roleLabel.textContent = u.role;
+    console.log({user: u, template: t, logIndex: logIndex, data: d}); // DEBUG
+    roleLabel.textContent = u.id + ': ' + u.extraData.role; // TODO: The user ID is just for understandability. It wouldn't be included for real.
     inputTxt.value = '';
     questionLabel.textContent = d.question;
     if(t === 'adjudicate_template') {
@@ -196,12 +311,29 @@ function makeReplayRequester<R>(log: Array<ScriptLogEntry<R>>, requester: Reques
     };
 }
 
-export const script = new FE(requester); // export is temporary.
+// TODO: Make one of these that has a "pool" of users, and then make the experiment example with users
+// spread over multiple, simultaneously running interaction scripts with the constraint that a user is
+// an honest expert in at most interaction script, a malicious expert in at most one, and a judge in the
+// remainder.
+function makeSimpleAgentRequester(): AgentRequester {
+    let userCount = 0;
+    return extraData => Promise.resolve({id: userCount++, extraData: extraData});
+}
+
+function makeLimitedAgentRequester(limit: number): AgentRequester {
+    let userCount = 0;
+    return extraData => {
+        if(userCount < limit) return Promise.resolve({id: userCount++, extraData: extraData});
+        return Promise.reject('No more users');
+    };
+}
+
+export const script = new FE(requester, makeLimitedAgentRequester(4)); // export is temporary.
 script.start('What is your question?').then(r => {
     console.log({done: r})
     console.log(script.log);
     const replayRequester = makeReplayRequester<FEResponse>(script.log.slice(0, 13), requester);
-    const replayScript = new FE(replayRequester);
+    const replayScript = new FE(replayRequester, makeSimpleAgentRequester());
     replayScript.start('What is your question?').then(r2 => {
         console.log({replayDone: r2})
         console.log(replayScript.log);
