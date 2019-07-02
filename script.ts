@@ -115,7 +115,8 @@ type FEResponse = {type: 'Questions', subquestions: Array<Question>}
 interface FESchedulerState {
     judges: Array<User>,
     judgeWorkedOn: {[userId: number]: Array<string>}, // Mapping from userId to workspace IDs this judge has worked on.
-    judgeAvailable: {[userId: number]: Boolean}
+    judgeAvailable: {[userId: number]: Boolean},
+    notifyAvailable: ((user: User) => void) | null
 }
 
 type FESchedulerMessage = {type: 'AllocUser', hint: any}
@@ -124,7 +125,11 @@ type FESchedulerMessage = {type: 'AllocUser', hint: any}
 
 class FE extends InteractionScript<Question, FEResponse, Answer, FESchedulerMessage, User> {
     private readonly model: Model = new Model({source: this.dsw});
-    private readonly schedulerState: FESchedulerState = {judges: [], judgeWorkedOn: {}, judgeAvailable: {}}; // Could be stored in the Model as well.
+    private readonly schedulerState: FESchedulerState = { // Could be stored in the Model as well.
+        judges: [],
+        judgeWorkedOn: {},
+        judgeAvailable: {},
+        notifyAvailable: null};
 
     constructor(requester: Requester<FEResponse>,
                 agentRequester: AgentRequester,
@@ -133,7 +138,7 @@ class FE extends InteractionScript<Question, FEResponse, Answer, FESchedulerMess
     }
 
     async schedulerBody(message: FESchedulerMessage): Promise<User | void> {
-        console.log({message: message, state: this.schedulerState}); // DEBUG
+        console.debug({message: message, state: this.schedulerState});
         switch(message.type) {
             case 'AllocUser':
                 switch(message.hint.role) {
@@ -182,9 +187,18 @@ class FE extends InteractionScript<Question, FEResponse, Answer, FESchedulerMess
                             // Sort largest to smallest.
                             const sortedJudges = judges.sort((a, b) => a[1] < b[1] ? 1 : a[1] > b[1] ? -1 : 0);
                             const chosenJudge = sortedJudges[0];
-                            // TODO: If this assert failse, no judge is available and we should block until some judge is available.
-                            console.assert(chosenJudge[1] !== -1/0);
-                            return chosenJudge[0];
+                            if(chosenJudge[1] !== -1/0) return chosenJudge[0];
+                            // This is the kind of ugly stuff I wouldn't want to be in the DSL-y parts, i.e. any of the methods
+                            // of FE, such as here.
+                            return new Promise((resolve, reject) => { // TODO: Make a better abstraction for this chaining of promises.
+                                const notify = state.notifyAvailable;
+                                if(notify === null) {
+                                    state.notifyAvailable = u => { state.notifyAvailable = null; resolve(u); };
+                                } else {
+                                    // This leads to a LIFO behavior of notifications.
+                                    state.notifyAvailable = u => { resolve(u); state.notifyAvailable = notify; };
+                                }
+                            });
                         }
                 }
                 break;
@@ -192,13 +206,18 @@ class FE extends InteractionScript<Question, FEResponse, Answer, FESchedulerMess
                 this.schedulerState.judgeAvailable[message.user.id] = false;
                 break;
             case 'UserWorkedOn':
-                this.schedulerState.judgeAvailable[message.user.id] = true;
-                const workspaces = this.schedulerState.judgeWorkedOn[message.user.id];
+                const user = message.user;
+                const userId = user.id;
+                const state = this.schedulerState;
+                state.judgeAvailable[userId] = true;
+                const workspaces = state.judgeWorkedOn[userId];
                 if(workspaces === void(0)) {
-                    this.schedulerState.judgeWorkedOn[message.user.id] = [message.workspace];
+                    state.judgeWorkedOn[userId] = [message.workspace];
                 } else if(!workspaces.includes(message.workspace)) {
                     workspaces.push(message.workspace);
                 }
+                const notify = state.notifyAvailable;
+                if(notify !== null) notify(user);
         }
     }
 
@@ -276,22 +295,22 @@ const responseObservable: Observable<[number, FEResponse]> = merge(
     merge(fromEvent(elements[0].answerBtn, 'click').pipe(map((_: Event) => [0, {type: 'Answer', answer: elements[0].inputTxt.value}])),
           fromEvent(elements[0].firstBtn, 'click').pipe(map((_: Event) => [0, {type: 'ChoseHonest', choice: true}])),
           fromEvent(elements[0].secondBtn, 'click').pipe(map((_: Event) => [0, {type: 'ChoseHonest', choice: false}])),
-          fromEvent(elements[0].askBtn, 'click').pipe(map((_: Event) => [0, {type: 'Questions', subquestions: [elements[0].inputTxt.value]}])),
+          fromEvent(elements[0].askBtn, 'click').pipe(map((_: Event) => [0, {type: 'Questions', subquestions: elements[0].inputTxt.value.split(';')}])),
           asapScheduler),
     merge(fromEvent(elements[1].answerBtn, 'click').pipe(map((_: Event) => [1, {type: 'Answer', answer: elements[1].inputTxt.value}])),
           fromEvent(elements[1].firstBtn, 'click').pipe(map((_: Event) => [1, {type: 'ChoseHonest', choice: true}])),
           fromEvent(elements[1].secondBtn, 'click').pipe(map((_: Event) => [1, {type: 'ChoseHonest', choice: false}])),
-          fromEvent(elements[1].askBtn, 'click').pipe(map((_: Event) => [1, {type: 'Questions', subquestions: [elements[1].inputTxt.value]}])),
+          fromEvent(elements[1].askBtn, 'click').pipe(map((_: Event) => [1, {type: 'Questions', subquestions: elements[1].inputTxt.value.split(';')}])),
           asapScheduler),
     merge(fromEvent(elements[2].answerBtn, 'click').pipe(map((_: Event) => [2, {type: 'Answer', answer: elements[2].inputTxt.value}])),
           fromEvent(elements[2].firstBtn, 'click').pipe(map((_: Event) => [2, {type: 'ChoseHonest', choice: true}])),
           fromEvent(elements[2].secondBtn, 'click').pipe(map((_: Event) => [2, {type: 'ChoseHonest', choice: false}])),
-          fromEvent(elements[2].askBtn, 'click').pipe(map((_: Event) => [2, {type: 'Questions', subquestions: [elements[2].inputTxt.value]}])),
+          fromEvent(elements[2].askBtn, 'click').pipe(map((_: Event) => [2, {type: 'Questions', subquestions: elements[2].inputTxt.value.split(';')}])),
           asapScheduler),
     merge(fromEvent(elements[3].answerBtn, 'click').pipe(map((_: Event) => [3, {type: 'Answer', answer: elements[3].inputTxt.value}])),
           fromEvent(elements[3].firstBtn, 'click').pipe(map((_: Event) => [3, {type: 'ChoseHonest', choice: true}])),
           fromEvent(elements[3].secondBtn, 'click').pipe(map((_: Event) => [3, {type: 'ChoseHonest', choice: false}])),
-          fromEvent(elements[3].askBtn, 'click').pipe(map((_: Event) => [3, {type: 'Questions', subquestions: [elements[3].inputTxt.value]}])),
+          fromEvent(elements[3].askBtn, 'click').pipe(map((_: Event) => [3, {type: 'Questions', subquestions: elements[3].inputTxt.value.split(';')}])),
           asapScheduler),
     asapScheduler) as Observable<[number, FEResponse]>; // TODO: Can I get rid of this cast?
 
@@ -303,35 +322,43 @@ responseObservable.subscribe(r => {
     const res = resolvers[i];
     elements[i].screenDiv.className = 'inactive';
     if(res !== null) {
+        resolvers[i] = null;
         res(r[1]);
     }
 });
 
 const nextEvent: (i: number) => Promise<FEResponse> = i => {
-    return new Promise<FEResponse>((resolve, reject) => resolvers[i] = resolve);
+    return new Promise<FEResponse>((resolve, reject) => { resolvers[i] = resolve; });
 };
 
 const requester: Requester<FEResponse> = (u: User, t: string, logIndex: number, d: any) => {
-    console.log({user: u, template: t, logIndex: logIndex, data: d}); // DEBUG
-    const els = elements[u.id];
-    els.roleLabel.textContent = u.id + ': ' + u.extraData.role; // TODO: The user ID is just for understandability. It wouldn't be included for real.
-    els.inputTxt.value = '';
-    els.questionLabel.textContent = d.question;
-    if(t === 'adjudicate_template') {
-        els.expertDiv.style.display = 'none';
-        els.judgeDiv.style.display = 'block';
-        els.extraLabel.textContent = d.subquestions.map((x: [Question, Answer]) => x[0]+': '+x[1]).join('\n\n');
-        els.firstAnswerLabel.textContent = d.honest_answer;
-        els.secondAnswerLabel.textContent = d.malicious_answer;
+    console.debug({user: u, template: t, logIndex: logIndex, data: d});
+    const res = resolvers[u.id];
+    if(res !== null) {
+        return new Promise((resolve, reject) => {
+            resolvers[u.id] = r => { res(r); requester(u, t, logIndex, d).then(resolve); }
+        });
     } else {
-        els.expertDiv.style.display = 'block';
-        els.judgeDiv.style.display = 'none';
-        els.extraLabel.textContent = t === 'malicious_template' ? d.honest_answer : '';
-        els.firstAnswerLabel.textContent = '';
-        els.secondAnswerLabel.textContent = '';
+        const els = elements[u.id];
+        els.roleLabel.textContent = u.id + ': ' + u.extraData.role; // TODO: The user ID is just for understandability. It wouldn't be included for real.
+        els.inputTxt.value = '';
+        els.questionLabel.textContent = d.question;
+        if(t === 'adjudicate_template') {
+            els.expertDiv.style.display = 'none';
+            els.judgeDiv.style.display = 'block';
+            els.extraLabel.textContent = d.subquestions.map((x: [Question, Answer]) => x[0]+': '+x[1]).join('\n\n');
+            els.firstAnswerLabel.textContent = d.honest_answer;
+            els.secondAnswerLabel.textContent = d.malicious_answer;
+        } else {
+            els.expertDiv.style.display = 'block';
+            els.judgeDiv.style.display = 'none';
+            els.extraLabel.textContent = t === 'malicious_template' ? d.honest_answer : '';
+            els.firstAnswerLabel.textContent = '';
+            els.secondAnswerLabel.textContent = '';
+        }
+        els.screenDiv.className = 'active';
+        return nextEvent(u.id);
     }
-    els.screenDiv.className = 'active';
-    return nextEvent(u.id);
 };
 
 function makeReplayRequester<R>(log: Array<ScriptLogEntry<R>>, requester: Requester<R>): Requester<R> {
