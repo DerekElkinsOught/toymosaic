@@ -244,6 +244,7 @@ class FE extends InteractionScript<Question, FEResponse, Answer, FESchedulerMess
 }
 
 const elements = [1,2,3,4].map(i => {
+    const screenDiv = document.getElementById('screen'+i) as HTMLDivElement;
     const roleLabel = document.getElementById('roleLabel'+i) as HTMLSpanElement;
     const questionLabel = document.getElementById('questionLabel'+i) as HTMLSpanElement;
     const extraLabel = document.getElementById('extraLabel'+i) as HTMLSpanElement;
@@ -256,7 +257,8 @@ const elements = [1,2,3,4].map(i => {
     const firstBtn = document.getElementById('firstBtn'+i) as HTMLInputElement;
     const secondAnswerLabel = document.getElementById('secondAnswerLabel'+i) as HTMLSpanElement;
     const secondBtn = document.getElementById('secondBtn'+i) as HTMLInputElement;
-    return {roleLabel: roleLabel
+    return {screenDiv: screenDiv
+           ,roleLabel: roleLabel
            ,questionLabel: questionLabel
            ,extraLabel: extraLabel
            ,inputTxt: inputTxt
@@ -268,7 +270,6 @@ const elements = [1,2,3,4].map(i => {
            ,firstBtn: firstBtn
            ,secondAnswerLabel: secondAnswerLabel
            ,secondBtn: secondBtn};
-
 });
 
 const responseObservable: Observable<[number, FEResponse]> = merge(
@@ -298,8 +299,9 @@ const responseObservable: Observable<[number, FEResponse]> = merge(
 let resolvers: Array<((r: FEResponse) => void) | null> = [null, null, null, null];
 
 responseObservable.subscribe(r => {
-    console.log(r);
-    const res = resolvers[r[0]];
+    const i = r[0];
+    const res = resolvers[i];
+    elements[i].screenDiv.className = 'inactive';
     if(res !== null) {
         res(r[1]);
     }
@@ -328,6 +330,7 @@ const requester: Requester<FEResponse> = (u: User, t: string, logIndex: number, 
         els.firstAnswerLabel.textContent = '';
         els.secondAnswerLabel.textContent = '';
     }
+    els.screenDiv.className = 'active';
     return nextEvent(u.id);
 };
 
